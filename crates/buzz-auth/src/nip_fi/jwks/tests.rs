@@ -1425,15 +1425,26 @@ async fn resolved_target_and_pin_key_seam_public_ipv6_and_fec0_rejection() {
 ///
 /// ## Mutation oracles
 /// 1. **Sharing:** Replace `Arc::clone(&source)` passed to the verifier with a
-///    fresh `Arc::new(second_source)` built from the same configs but independent.
-///    Pre-advancement A1 still verifies (both arcs warm from the same initial
-///    fetch). Post-advancement the verifier's arc is stale; A1-reject and
-///    A2-accept assertions both flip red.
+///    fresh `Arc::new(second_source)` built from the same configs but independent,
+///    sharing the same controlled clock. Warm the independent source with a
+///    separate A1 fetch before advancing the clock. After advancement, the
+///    verifier's stale arc sees its A1 snapshot as expired (purge clears it)
+///    and never re-fetches, so it returns no keys at all. The A2-accept
+///    assertion flips red reliably, because the verifier never observes A2.
+///    The A1-reject assertion stays green: the independent cache is also
+///    expired (same advanced clock), so that source also returns no A1 keys —
+///    A1 tokens are still rejected, but through expiry of the independent
+///    cache rather than through shared-arc rotation. **A2 acceptance is the
+///    reliable shared-source oracle here.**
 ///
-/// Note: the expiry-purge (`state.snapshot = None` in `get_snapshot`) is a
-/// write-path optimization; A1 rejection after the deadline is enforced
-/// independently by the `key_set` read path (`filter(|c| now < c.hard_deadline)`),
-/// so no separate purge mutation oracle is claimed here.
+/// Note: the expiry-purge (`state.snapshot = None` in `get_snapshot`) is
+/// correctness-critical for concurrent callers: it clears the expired snapshot
+/// before permit acquisition, so a caller that loses the permit race and falls
+/// back to `state.snapshot` receives `None` rather than an expired snapshot.
+/// A1 rejection after the deadline is also enforced independently by the `key_set`
+/// read path (`filter(|c| now < c.hard_deadline)`), but the purge is what
+/// prevents the fallback path from serving a stale snapshot to concurrent
+/// refresh losers, so no separate purge mutation oracle is claimed here.
 #[tokio::test]
 async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
     use crate::nip_fi::{
@@ -1533,7 +1544,7 @@ async fn shared_arc_source_verifier_rejects_expired_a1_accepts_a2() {
     };
     // Mutation oracle 1 (sharing): pass a second independent Arc to the verifier.
     // Both arcs see the A1 warm cache, but post-advancement the verifier's arc
-    // is stale — A1-reject and A2-accept assertions flip red.
+    // is stale — A2-accept flips red reliably (verifier never observes A2 keys).
     let source = Arc::new(
         ProductionJwksSource::new_with_clock(
             vec![config],
